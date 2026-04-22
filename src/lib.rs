@@ -1,332 +1,77 @@
-use ab_glyph::{Font, Point, Rect, ScaleFont};
-use image::{Rgba, RgbaImage, imageops};
-use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use image::{GenericImage, Rgba, RgbaImage, imageops};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use std::sync::OnceLock;
 
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let i = (h * 6.0).floor() as i32;
-    let f = h.mul_add(6.0, -(i as f32));
-    let p = v * (1.0 - s);
-    let q = v * f.mul_add(-s, 1.0);
-    let t = v * (1.0 - f).mul_add(-s, 1.0);
-    let (r, g, b) = match i.rem_euclid(6) {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        5 => (v, p, q),
-        _ => (0.0, 0.0, 0.0),
-    };
-    (
-        (r * 255.0).round() as u8,
-        (g * 255.0).round() as u8,
-        (b * 255.0).round() as u8,
-    )
+mod render;
+mod util;
+
+static CELL_SIZE: OnceLock<(u32, u32)> = OnceLock::new();
+
+pub fn render_one(cell_index: u32) -> RgbaImage {
+    let cell = render::render_cell(0, 0, cell_index);
+    let _ = CELL_SIZE.set(cell.dimensions());
+
+    cell
 }
 
-/// 各セル内で各種効果を適用して文字を描画する（描画位置は `base_x`, `base_y` から）
-fn draw_cell(
-    canvas: &mut RgbaImage,
-    base_x: u32,
-    base_y: u32,
-    text_stamp: &RgbaImage,
-    cell_index: u32,
-    stamp_w: u32,
-    stamp_h: u32,
-) {
-    // (1) Glow 効果
-    let glow_range: i32 = 3;
-    for dx in -glow_range..=glow_range {
-        for dy in -glow_range..=glow_range {
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
-            let alpha_factor = ((glow_range as f32 - dist) / glow_range as f32).max(0.0) * 0.3;
-            for (px, py, &p) in text_stamp.enumerate_pixels() {
-                let dest_x = base_x as i32 + dx + px as i32;
-                let dest_y = base_y as i32 + dy + py as i32;
-                if dest_x >= 0
-                    && dest_y >= 0
-                    && dest_x < canvas.width() as i32
-                    && dest_y < canvas.height() as i32
-                {
-                    let Rgba([r, g, b, a]) = p;
-                    let white = 255u8;
-                    let new_r = f32::from(r)
-                        .mul_add(1.0 - alpha_factor, f32::from(white) * alpha_factor)
-                        .min(255.0) as u8;
-                    let new_g = f32::from(g)
-                        .mul_add(1.0 - alpha_factor, f32::from(white) * alpha_factor)
-                        .min(255.0) as u8;
-                    let new_b = f32::from(b)
-                        .mul_add(1.0 - alpha_factor, f32::from(white) * alpha_factor)
-                        .min(255.0) as u8;
-                    canvas.put_pixel(dest_x as u32, dest_y as u32, Rgba([new_r, new_g, new_b, a]));
-                }
-            }
-        }
-    }
+pub fn render_many(count: u32) -> RgbaImage {
+    let cells: Vec<RgbaImage> = (0..count).into_par_iter().map(|i| render_one(i)).collect();
 
-    // (2) Extrusion 効果（縦方向の伸びを抑えるため base_dy を 2 に）
-    let extrude_steps = 8;
-    let base_dx = 5;
-    let base_dy = 2;
-    for extrude in 0..extrude_steps {
-        let off_x = base_x + extrude * base_dx;
-        let off_y = base_y + extrude * base_dy;
-        let dark_factor = 1.0 - (extrude as f32) / ((extrude_steps + 1) as f32);
-        for (px, py, &p) in text_stamp.enumerate_pixels() {
-            let distortion_x = 5.0 * (((px as f32) + cell_index as f32) * 0.17).sin();
-            let distortion_y = 5.0 * (((py as f32) + cell_index as f32) * 0.17).cos();
-            let dest_x = off_x + px + distortion_x.round() as u32;
-            let dest_y = off_y + py + distortion_y.round() as u32;
-            if dest_x < canvas.width() && dest_y < canvas.height() {
-                let Rgba([r, g, b, a]) = p;
-                let new_r = (f32::from(r) * dark_factor).min(255.0) as u8;
-                let new_g = (f32::from(g) * dark_factor).min(255.0) as u8;
-                let new_b = (f32::from(b) * dark_factor).min(255.0) as u8;
-                canvas.put_pixel(dest_x, dest_y, Rgba([new_r, new_g, new_b, a]));
-            }
-        }
-    }
+    let (cell_w, cell_h) = CELL_SIZE.get().unwrap_or(&(0, 0));
 
-    // (3) 回転・変形効果付き前面描画（y軸は 0.7 倍で圧縮）
-    let center_x = stamp_w as f32 / 2.0;
-    let center_y = stamp_h as f32 / 2.0;
-    let angle = 0.3 * ((cell_index as f32 * 0.7).sin());
-    let cos_a = angle.cos();
-    let sin_a = angle.sin();
-    for (px, py, &p) in text_stamp.enumerate_pixels() {
-        let dx = px as f32 - center_x;
-        let dy = py as f32 - center_y;
-        let rdx = dx.mul_add(cos_a, -(dy * sin_a));
-        let rdy = dx.mul_add(sin_a, dy * cos_a);
-        let new_x = center_x + rdx;
-        let new_y = rdy.mul_add(0.7, center_y);
-        let dest_x = base_x + new_x.round() as u32;
-        let dest_y = base_y + new_y.round() as u32;
-        if dest_x < canvas.width() && dest_y < canvas.height() {
-            let Rgba([r, g, b, a]) = p;
-            let new_r = r.saturating_add(30);
-            canvas.put_pixel(dest_x, dest_y, Rgba([new_r, g, b, a]));
-        }
-    }
+    let final_w = count * cell_w;
+    let final_h = *cell_h;
 
-    // (4) Sparkle 効果
-    for (px, py, &p) in text_stamp.enumerate_pixels() {
-        let Rgba([r, g, b, a]) = p;
-        let lum = (u32::from(r) + u32::from(g) + u32::from(b)) / 3;
-        if lum > 200 && ((px + py + cell_index) % 97 == 0) {
-            let dest_x = base_x + px;
-            let dest_y = base_y + py;
-            if dest_x < canvas.width() && dest_y < canvas.height() {
-                canvas.put_pixel(dest_x, dest_y, Rgba([255, 255, 255, a]));
-            }
-        }
-    }
-
-    // (5) 既存のシュール効果：特定条件で若干右へずらし、色味を微調整
-    for (px, py, &p) in text_stamp.enumerate_pixels() {
-        if (px + py + cell_index) % 101 == 0 {
-            let dest_x = base_x + px + 3; // 横方向に 3 ピクセルずらす
-            let dest_y = base_y + py;
-            if dest_x < canvas.width() && dest_y < canvas.height() {
-                let Rgba([r, g, b, a]) = p;
-                let new_r = r.saturating_sub(10);
-                let new_g = g.saturating_sub(10);
-                let new_b = ((u16::from(b) + 10).min(255)) as u8;
-                canvas.put_pixel(dest_x, dest_y, Rgba([new_r, new_g, new_b, a]));
-            }
-        }
-    }
-
-    // (6) 新たなカラフル乱れ効果：1/7 程度のピクセルをにゃぐにゃぐ動かし、HSV で大幅な色変調
-    for (px, py, &p) in text_stamp.enumerate_pixels() {
-        if (px + py + cell_index) % 7 == 0 {
-            let offset_x = (5.0 * ((px as f32 + cell_index as f32) * 0.27).sin()).round() as i32;
-            let offset_y = (5.0 * ((py as f32 + cell_index as f32) * 0.27).cos()).round() as i32;
-            let dest_x = base_x as i32 + px as i32 + offset_x;
-            let dest_y = base_y as i32 + py as i32 + offset_y;
-            if dest_x >= 0
-                && dest_y >= 0
-                && dest_x < canvas.width() as i32
-                && dest_y < canvas.height() as i32
-            {
-                let hue = (cell_index as f32).mul_add(
-                    0.05,
-                    (px as f32 / stamp_w as f32) + (py as f32 / stamp_h as f32),
-                ) % 1.0;
-                let (r2, g2, b2) = hsv_to_rgb(hue, 0.9, 1.0);
-                let Rgba([r, g, b, a]) = p;
-                let new_r = ((u16::from(r) + u16::from(r2)) / 2) as u8;
-                let new_g = ((u16::from(g) + u16::from(g2)) / 2) as u8;
-                let new_b = ((u16::from(b) + u16::from(b2)) / 2) as u8;
-                canvas.put_pixel(dest_x as u32, dest_y as u32, Rgba([new_r, new_g, new_b, a]));
-            }
-        }
-    }
-}
-
-/// 各セルをレンダリングする際、余白なしでテキスト部分のみ描画した画像を返す
-fn render_cell(cell_index: u32, text_stamp: &RgbaImage, stamp_w: u32, stamp_h: u32) -> RgbaImage {
-    // 余白無しなのでセルキャンバスサイズはそのまま
-    let cell_w = stamp_w;
-    let cell_h = stamp_h;
-    let mut cell_canvas = RgbaImage::from_pixel(cell_w, cell_h, Rgba([255, 255, 255, 255]));
-    draw_cell(
-        &mut cell_canvas,
-        0,
-        0,
-        text_stamp,
-        cell_index,
-        stamp_w,
-        stamp_h,
-    );
-    cell_canvas
-}
-
-/// 並列処理で各セルをレンダリングし、セル画像を合成して横一列の画像を生成する
-pub fn benchmark_render(
-    letter_count: u32,
-    stamp_w: u32,
-    stamp_h: u32,
-    text_stamp: &RgbaImage,
-) -> (Duration, RgbaImage) {
-    let start = Instant::now();
-    let cell_images: Vec<RgbaImage> = (0..letter_count)
-        .into_par_iter()
-        .map(|i| render_cell(i, text_stamp, stamp_w, stamp_h))
-        .collect();
-    let final_w = letter_count * stamp_w;
-    let final_h = stamp_h;
     let mut canvas = RgbaImage::from_pixel(final_w, final_h, Rgba([255, 255, 255, 255]));
-    for (i, cell) in cell_images.into_iter().enumerate() {
-        let dest_x = i as u32 * stamp_w;
-        imageops::overlay(&mut canvas, &cell, i64::from(dest_x), 0);
-    }
-    (start.elapsed(), canvas)
-}
-
-fn calculate_bounding_box(font: &impl Font, scale: f32, text: &str) -> Rect {
-    let scaled_font = font.as_scaled(scale);
-
-    let mut caret = ab_glyph::point(0.0, scaled_font.ascent());
-    let mut previous = None;
-    let mut min_x = f32::NAN;
-    let mut min_y = f32::NAN;
-    let mut max_x = f32::NAN;
-    let mut max_y = f32::NAN;
-    for c in text.chars() {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev_id) = previous {
-            caret.x += scaled_font.kern(prev_id, glyph_id);
-        }
-        let glyph = glyph_id.with_scale_and_position(scale, caret);
-        caret.x += scaled_font.h_advance(glyph_id);
-        previous = Some(glyph_id);
-
-        if let Some(og) = font.outline_glyph(glyph) {
-            let bb = og.px_bounds();
-            min_x = min_x.min(bb.min.x);
-            min_y = min_y.min(bb.min.y);
-            max_x = max_x.max(bb.max.x);
-            max_y = max_y.max(bb.max.y);
-        }
+    for (i, cell) in cells.into_iter().enumerate() {
+        let dest_x = i as u32 * cell_w;
+        canvas.copy_from(&cell, dest_x, 0).unwrap();
     }
 
-    Rect {
-        min: ab_glyph::point(min_x, min_y),
-        max: ab_glyph::point(max_x, max_y),
-    }
+    canvas
 }
 
-fn draw_text(
-    font: &impl Font,
-    scale: f32,
-    text: &str,
-    offset: Point,
-    mut f: impl FnMut(u32, u32, f32, Rect),
-) {
-    let scaled_font = font.as_scaled(scale);
+pub fn render_result(count: u32, width: u32, height: u32) -> RgbaImage {
+    let cells: Vec<RgbaImage> = (0..count).into_par_iter().map(|i| render_one(i)).collect();
 
-    let mut caret = offset;
-    let mut previous = None;
-    for c in text.chars() {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev_id) = previous {
-            caret.x += scaled_font.kern(prev_id, glyph_id);
+    let (cell_w, cell_h) = CELL_SIZE.get().unwrap_or(&(0, 0));
+
+    // 最もaspect_ratioに近い並べ方を探索
+    // TODO: 最適化の余地いっぱいあり
+    let mut best = u32::MAX;
+    let mut columns = 1;
+    for c in 1..=count {
+        // aとbの値が最も近づくポイントを探す
+        let a = c * cell_w * height;
+        let b = count.div_ceil(c) * cell_h * width;
+        let score = a.max(b) - a.min(b);
+        if score < best {
+            best = score;
+            columns = c;
         }
-        let glyph = glyph_id.with_scale_and_position(scale, caret);
-        caret.x += scaled_font.h_advance(glyph_id);
-        previous = Some(glyph_id);
 
-        if let Some(og) = font.outline_glyph(glyph) {
-            let bb = og.px_bounds();
-            og.draw(|gx, gy, v| f(gx, gy, v, bb));
+        // aとbが逆転したらそれ以降は探索不要
+        if a > b {
+            break;
         }
     }
-}
 
-// フォント読み込み＆文字スタンプ生成（フォントサイズ 256）
-pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
-    let bb = calculate_bounding_box(font, 32.0, text);
-
-    let text_width = (bb.max.x - bb.min.x) as u32;
-    let text_height = (bb.max.y - bb.min.y) as u32;
-
-    let stamp_width = text_width + 2 * margin;
-    let stamp_height = text_height + 2 * margin;
-
-    let mut text_stamp =
-        RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([255, 255, 255, 255]));
-
-    // Draw
-    let scaled_font = font.as_scaled(32.0);
-    let offset = ab_glyph::point(
-        margin as f32 - bb.min.x,
-        margin as f32 - bb.min.y + scaled_font.ascent(),
-    );
-    draw_text(font, 32.0, text, offset, |gx, gy, v, bb| {
-        let x = bb.min.x + gx as f32;
-        let y = bb.min.y + gy as f32;
-        if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-            let hue = x / (stamp_width as f32);
-            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
-            let blended_r = f32::from(r).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-            let blended_g = f32::from(g).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-            let blended_b = f32::from(b).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-            text_stamp.put_pixel(
-                x as u32,
-                y as u32,
-                Rgba([blended_r, blended_g, blended_b, 255]),
-            );
+    // 求めた並べ方で並べる
+    let columns = columns;
+    let rows = count.div_ceil(columns);
+    let mut canvas =
+        RgbaImage::from_pixel(columns * cell_w, rows * cell_h, Rgba([255, 255, 255, 255]));
+    for (i, row) in cells.chunks(columns as usize).enumerate() {
+        for (j, cell) in row.iter().enumerate() {
+            canvas
+                .copy_from(cell, j as u32 * cell_w, i as u32 * cell_h)
+                .unwrap();
         }
-    });
+    }
 
-    text_stamp
-}
+    // 指定サイズにリサイズ
+    let mut final_img = imageops::resize(&canvas, width, height, imageops::Lanczos3);
+    render::render_overlay(&mut final_img, &format!("スコア: {count}"));
 
-pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
-    let bb = calculate_bounding_box(font, 64.0, text);
-
-    let text_width = (bb.max.x - bb.min.x) as u32;
-    let text_height = (bb.max.y - bb.min.y) as u32;
-
-    let stamp_width = text_width + 20;
-    let stamp_height = text_height + 20;
-
-    let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 0]));
-
-    // Draw
-    let scaled_font = font.as_scaled(64.0);
-    let offset = ab_glyph::point(10.0 - bb.min.x, 10.0 - bb.min.y + scaled_font.ascent());
-    draw_text(font, 64.0, text, offset, |gx, gy, v, bb| {
-        let x = bb.min.x + gx as f32;
-        let y = bb.min.y + gy as f32;
-        if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-            let alpha = (v * 255.0).round() as u8;
-            text_stamp.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, alpha]));
-        }
-    });
-
-    text_stamp
+    final_img
 }
