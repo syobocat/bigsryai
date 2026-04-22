@@ -70,6 +70,7 @@ fn main() {
     println!("スコア:\t{count}");
 
     // ----- 最終結果画像生成 -----
+    println!("結果画像出力中……");
     let final_img = bigsryai::render_result(count, 1920, 1080);
     final_img
         .save("output.png")
