@@ -122,7 +122,7 @@ pub fn generate_overlay(text: &str) -> RgbaImage {
     let stamp_width = text_width + 2 * MARGIN_OVERLAY;
     let stamp_height = text_height + 2 * MARGIN_OVERLAY;
 
-    let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 0]));
+    let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 224]));
 
     // Draw
     let scaled_font = font.as_scaled(FONT_SCALE_OVERLAY);
@@ -134,8 +134,8 @@ pub fn generate_overlay(text: &str) -> RgbaImage {
         let x = bb.min.x + gx as f32;
         let y = bb.min.y + gy as f32;
         if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-            let alpha = (v * 255.0).round() as u8;
-            text_stamp.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, alpha]));
+            let color = (v * 255.0).round() as u8;
+            text_stamp.put_pixel(x as u32, y as u32, Rgba([color, color, color, 224]));
         }
     });
 

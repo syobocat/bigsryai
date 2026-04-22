@@ -1,4 +1,4 @@
-use image::{GenericImage, Rgba, RgbaImage};
+use image::{Rgba, RgbaImage, imageops};
 
 use crate::util;
 
@@ -150,5 +150,5 @@ pub fn render_overlay(canvas: &mut RgbaImage, text: &str) {
     let pos_x = canvas.width().saturating_sub(overlay.width() + 10);
     let pos_y = canvas.height().saturating_sub(overlay.height() + 10);
 
-    canvas.copy_from(&overlay, pos_x, pos_y).unwrap();
+    imageops::overlay(canvas, &overlay, pos_x as i64, pos_y as i64);
 }
