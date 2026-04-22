@@ -235,7 +235,7 @@ fn calculate_bounding_box(font: &impl Font, scale: f32, text: &str) -> Rect {
 
     Rect {
         min: ab_glyph::point(min_x, min_y),
-        max: ab_glyph::point(min_x, min_y),
+        max: ab_glyph::point(max_x, max_y),
     }
 }
 
