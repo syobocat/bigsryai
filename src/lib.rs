@@ -1,4 +1,4 @@
-use ab_glyph::{Font, ScaleFont};
+use ab_glyph::{Font, Rect, ScaleFont};
 use image::{Rgba, RgbaImage, imageops};
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
@@ -206,11 +206,9 @@ pub fn benchmark_render(
     (start.elapsed(), canvas)
 }
 
-// フォント読み込み＆文字スタンプ生成（フォントサイズ 256）
-pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
-    let scaled_font = font.as_scaled(32.0);
+fn calculate_bounding_box(font: &impl Font, scale: f32, text: &str) -> Rect {
+    let scaled_font = font.as_scaled(scale);
 
-    // Calculate bounding box size
     let mut caret = ab_glyph::point(0.0, scaled_font.ascent());
     let mut previous = None;
     let mut min_x = f32::NAN;
@@ -222,7 +220,7 @@ pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
         if let Some(prev_id) = previous {
             caret.x += scaled_font.kern(prev_id, glyph_id);
         }
-        let glyph = glyph_id.with_scale_and_position(32.0, caret);
+        let glyph = glyph_id.with_scale_and_position(scale, caret);
         caret.x += scaled_font.h_advance(glyph_id);
         previous = Some(glyph_id);
 
@@ -235,8 +233,20 @@ pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
         }
     }
 
-    let text_width = (max_x - min_x) as u32;
-    let text_height = (max_y - min_y) as u32;
+    Rect {
+        min: ab_glyph::point(min_x, min_y),
+        max: ab_glyph::point(min_x, min_y),
+    }
+}
+
+// フォント読み込み＆文字スタンプ生成（フォントサイズ 256）
+pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
+    let scaled_font = font.as_scaled(32.0);
+
+    let bb = calculate_bounding_box(font, 32.0, text);
+
+    let text_width = (bb.max.x - bb.min.x) as u32;
+    let text_height = (bb.max.y - bb.min.y) as u32;
 
     let stamp_width = text_width + 2 * margin;
     let stamp_height = text_height + 2 * margin;
@@ -246,8 +256,8 @@ pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
 
     // Draw
     let mut caret = ab_glyph::point(
-        margin as f32 - min_x,
-        margin as f32 - min_y + scaled_font.ascent(),
+        margin as f32 - bb.min.x,
+        margin as f32 - bb.min.y + scaled_font.ascent(),
     );
     let mut previous = None;
     for c in text.chars() {
@@ -286,33 +296,10 @@ pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
 pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
     let scaled_font = font.as_scaled(64.0);
 
-    // Calculate bounding box size
-    let mut caret = ab_glyph::point(0.0, scaled_font.ascent());
-    let mut previous = None;
-    let mut min_x = f32::NAN;
-    let mut min_y = f32::NAN;
-    let mut max_x = f32::NAN;
-    let mut max_y = f32::NAN;
-    for c in text.chars() {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev_id) = previous {
-            caret.x += scaled_font.kern(prev_id, glyph_id);
-        }
-        let glyph = glyph_id.with_scale_and_position(64.0, caret);
-        caret.x += scaled_font.h_advance(glyph_id);
-        previous = Some(glyph_id);
+    let bb = calculate_bounding_box(font, 64.0, text);
 
-        if let Some(og) = font.outline_glyph(glyph) {
-            let bb = og.px_bounds();
-            min_x = min_x.min(bb.min.x);
-            min_y = min_y.min(bb.min.y);
-            max_x = max_x.max(bb.max.x);
-            max_y = max_y.max(bb.max.y);
-        }
-    }
-
-    let text_width = (max_x - min_x) as u32;
-    let text_height = (max_y - min_y) as u32;
+    let text_width = (bb.max.x - bb.min.x) as u32;
+    let text_height = (bb.max.y - bb.min.y) as u32;
 
     let stamp_width = text_width + 20;
     let stamp_height = text_height + 20;
@@ -320,7 +307,7 @@ pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
     let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 0]));
 
     // Draw
-    let mut caret = ab_glyph::point(10.0 - min_x, 10.0 - min_y + scaled_font.ascent());
+    let mut caret = ab_glyph::point(10.0 - bb.min.x, 10.0 - bb.min.y + scaled_font.ascent());
     let mut previous = None;
     for c in text.chars() {
         let glyph_id = font.glyph_id(c);
