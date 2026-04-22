@@ -1,4 +1,4 @@
-use ab_glyph::{Font, Rect, ScaleFont};
+use ab_glyph::{Font, Point, Rect, ScaleFont};
 use image::{Rgba, RgbaImage, imageops};
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
@@ -239,10 +239,35 @@ fn calculate_bounding_box(font: &impl Font, scale: f32, text: &str) -> Rect {
     }
 }
 
+fn draw_text(
+    font: &impl Font,
+    scale: f32,
+    text: &str,
+    offset: Point,
+    mut f: impl FnMut(u32, u32, f32, Rect),
+) {
+    let scaled_font = font.as_scaled(scale);
+
+    let mut caret = offset;
+    let mut previous = None;
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        if let Some(prev_id) = previous {
+            caret.x += scaled_font.kern(prev_id, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(scale, caret);
+        caret.x += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
+
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            og.draw(|gx, gy, v| f(gx, gy, v, bb));
+        }
+    }
+}
+
 // フォント読み込み＆文字スタンプ生成（フォントサイズ 256）
 pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
-    let scaled_font = font.as_scaled(32.0);
-
     let bb = calculate_bounding_box(font, 32.0, text);
 
     let text_width = (bb.max.x - bb.min.x) as u32;
@@ -255,47 +280,32 @@ pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
         RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([255, 255, 255, 255]));
 
     // Draw
-    let mut caret = ab_glyph::point(
+    let scaled_font = font.as_scaled(32.0);
+    let offset = ab_glyph::point(
         margin as f32 - bb.min.x,
         margin as f32 - bb.min.y + scaled_font.ascent(),
     );
-    let mut previous = None;
-    for c in text.chars() {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev_id) = previous {
-            caret.x += scaled_font.kern(prev_id, glyph_id);
+    draw_text(font, 32.0, text, offset, |gx, gy, v, bb| {
+        let x = bb.min.x + gx as f32;
+        let y = bb.min.y + gy as f32;
+        if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
+            let hue = x / (stamp_width as f32);
+            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
+            let blended_r = f32::from(r).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
+            let blended_g = f32::from(g).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
+            let blended_b = f32::from(b).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
+            text_stamp.put_pixel(
+                x as u32,
+                y as u32,
+                Rgba([blended_r, blended_g, blended_b, 255]),
+            );
         }
-        let glyph = glyph_id.with_scale_and_position(32.0, caret);
-        caret.x += scaled_font.h_advance(glyph_id);
-        previous = Some(glyph_id);
-
-        if let Some(og) = font.outline_glyph(glyph) {
-            let bb = og.px_bounds();
-            og.draw(|gx, gy, v| {
-                let x = bb.min.x + gx as f32;
-                let y = bb.min.y + gy as f32;
-                if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-                    let hue = x / (stamp_width as f32);
-                    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
-                    let blended_r = f32::from(r).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-                    let blended_g = f32::from(g).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-                    let blended_b = f32::from(b).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
-                    text_stamp.put_pixel(
-                        x as u32,
-                        y as u32,
-                        Rgba([blended_r, blended_g, blended_b, 255]),
-                    );
-                }
-            });
-        }
-    }
+    });
 
     text_stamp
 }
 
 pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
-    let scaled_font = font.as_scaled(64.0);
-
     let bb = calculate_bounding_box(font, 64.0, text);
 
     let text_width = (bb.max.x - bb.min.x) as u32;
@@ -307,29 +317,16 @@ pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
     let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 0]));
 
     // Draw
-    let mut caret = ab_glyph::point(10.0 - bb.min.x, 10.0 - bb.min.y + scaled_font.ascent());
-    let mut previous = None;
-    for c in text.chars() {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev_id) = previous {
-            caret.x += scaled_font.kern(prev_id, glyph_id);
+    let scaled_font = font.as_scaled(64.0);
+    let offset = ab_glyph::point(10.0 - bb.min.x, 10.0 - bb.min.y + scaled_font.ascent());
+    draw_text(font, 64.0, text, offset, |gx, gy, v, bb| {
+        let x = bb.min.x + gx as f32;
+        let y = bb.min.y + gy as f32;
+        if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
+            let alpha = (v * 255.0).round() as u8;
+            text_stamp.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, alpha]));
         }
-        let glyph = glyph_id.with_scale_and_position(64.0, caret);
-        caret.x += scaled_font.h_advance(glyph_id);
-        previous = Some(glyph_id);
-
-        if let Some(og) = font.outline_glyph(glyph) {
-            let bb = og.px_bounds();
-            og.draw(|gx, gy, v| {
-                let x = bb.min.x + gx as f32;
-                let y = bb.min.y + gy as f32;
-                if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-                    let alpha = (v * 255.0).round() as u8;
-                    text_stamp.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, alpha]));
-                }
-            });
-        }
-    }
+    });
 
     text_stamp
 }
