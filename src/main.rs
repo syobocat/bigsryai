@@ -1,5 +1,5 @@
-use image::{imageops, GenericImageView, Rgba, RgbaImage};
-use rusttype::Font;
+use ab_glyph::FontRef;
+use image::{GenericImageView, Rgba, RgbaImage, imageops};
 use std::{env, time::Duration};
 use sysinfo::System;
 
@@ -21,7 +21,7 @@ fn main() {
     println!("---------------------------------------");
 
     let font_data = include_bytes!("Nyashi.ttf") as &[u8];
-    let font = Font::try_from_bytes(font_data).expect("フォント読み込み失敗");
+    let font = FontRef::try_from_slice(font_data).expect("フォント読み込み失敗");
 
     let text_stamp = bigsryai::generate_stamp(&font, "nexryai", 2);
     let stamp_width = text_stamp.width();
@@ -56,7 +56,8 @@ fn main() {
         let (duration, _) = bigsryai::benchmark_render(mid, stamp_width, stamp_height, &text_stamp);
         let canvas_width = mid * stamp_width;
         println!(
-            "二分探索中:\tねく数 = {mid}\tキャンバスサイズ = {canvas_width}x{stamp_height}\t経過時間 = {duration:.2?}");
+            "二分探索中:\tねく数 = {mid}\tキャンバスサイズ = {canvas_width}x{stamp_height}\t経過時間 = {duration:.2?}"
+        );
         if duration > threshold {
             upper = mid;
         } else {

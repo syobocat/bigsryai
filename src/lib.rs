@@ -1,6 +1,6 @@
-use image::{imageops, Rgba, RgbaImage};
+use ab_glyph::{Font, ScaleFont};
+use image::{Rgba, RgbaImage, imageops};
 use rayon::prelude::*;
-use rusttype::{point, Font, Scale};
 use std::time::{Duration, Instant};
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -207,48 +207,65 @@ pub fn benchmark_render(
 }
 
 // フォント読み込み＆文字スタンプ生成（フォントサイズ 256）
-pub fn generate_stamp(font: &Font, text: &str, margin: u32) -> RgbaImage {
-    let scale = Scale::uniform(32.);
-    let v_metrics = font.v_metrics(scale);
-    let glyphs = font.layout(text, scale, point(0.0, v_metrics.ascent));
-    let min_x = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.min.x))
-        .min()
-        .unwrap_or(0);
-    let min_y = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.min.y))
-        .min()
-        .unwrap_or(0);
-    let max_x = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.x))
-        .max()
-        .unwrap_or(0);
-    let max_y = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.y))
-        .max()
-        .unwrap_or(0);
+pub fn generate_stamp(font: &impl Font, text: &str, margin: u32) -> RgbaImage {
+    let scaled_font = font.as_scaled(32.0);
+
+    // Calculate bounding box size
+    let mut caret = ab_glyph::point(0.0, scaled_font.ascent());
+    let mut previous = None;
+    let mut min_x = f32::NAN;
+    let mut min_y = f32::NAN;
+    let mut max_x = f32::NAN;
+    let mut max_y = f32::NAN;
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        if let Some(prev_id) = previous {
+            caret.x += scaled_font.kern(prev_id, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(32.0, caret);
+        caret.x += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
+
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            min_x = min_x.min(bb.min.x);
+            min_y = min_y.min(bb.min.y);
+            max_x = max_x.max(bb.max.x);
+            max_y = max_y.max(bb.max.y);
+        }
+    }
+
     let text_width = (max_x - min_x) as u32;
     let text_height = (max_y - min_y) as u32;
 
     let stamp_width = text_width + 2 * margin;
     let stamp_height = text_height + 2 * margin;
+
     let mut text_stamp =
         RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([255, 255, 255, 255]));
-    let offset = point(
-        margin as f32 - min_x as f32,
-        margin as f32 - min_y as f32 + v_metrics.ascent,
+
+    // Draw
+    let mut caret = ab_glyph::point(
+        margin as f32 - min_x,
+        margin as f32 - min_y + scaled_font.ascent(),
     );
-    for glyph in font.layout(text, scale, offset) {
-        if let Some(bb) = glyph.pixel_bounding_box() {
-            glyph.draw(|gx, gy, v| {
-                let x = bb.min.x + gx as i32;
-                let y = bb.min.y + gy as i32;
-                if x >= 0 && y >= 0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
-                    let hue = (x as f32) / (stamp_width as f32);
+    let mut previous = None;
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        if let Some(prev_id) = previous {
+            caret.x += scaled_font.kern(prev_id, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(32.0, caret);
+        caret.x += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
+
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            og.draw(|gx, gy, v| {
+                let x = bb.min.x + gx as f32;
+                let y = bb.min.y + gy as f32;
+                if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
+                    let hue = x / (stamp_width as f32);
                     let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
                     let blended_r = f32::from(r).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
                     let blended_g = f32::from(g).mul_add(v, 255.0 * (1.0 - v)).round() as u8;
@@ -266,43 +283,60 @@ pub fn generate_stamp(font: &Font, text: &str, margin: u32) -> RgbaImage {
     text_stamp
 }
 
-pub fn generate_overlay(font: &Font, text: &str) -> RgbaImage {
-    let scale = Scale::uniform(64.);
-    let v_metrics = font.v_metrics(scale);
-    let glyphs = font.layout(text, scale, point(0.0, v_metrics.ascent));
-    let min_x = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.min.x))
-        .min()
-        .unwrap_or(0);
-    let min_y = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.min.y))
-        .min()
-        .unwrap_or(0);
-    let max_x = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.x))
-        .max()
-        .unwrap_or(0);
-    let max_y = glyphs
-        .clone()
-        .filter_map(|g| g.pixel_bounding_box().map(|bb| bb.max.y))
-        .max()
-        .unwrap_or(0);
+pub fn generate_overlay(font: &impl Font, text: &str) -> RgbaImage {
+    let scaled_font = font.as_scaled(64.0);
+
+    // Calculate bounding box size
+    let mut caret = ab_glyph::point(0.0, scaled_font.ascent());
+    let mut previous = None;
+    let mut min_x = f32::NAN;
+    let mut min_y = f32::NAN;
+    let mut max_x = f32::NAN;
+    let mut max_y = f32::NAN;
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        if let Some(prev_id) = previous {
+            caret.x += scaled_font.kern(prev_id, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(64.0, caret);
+        caret.x += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
+
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            min_x = min_x.min(bb.min.x);
+            min_y = min_y.min(bb.min.y);
+            max_x = max_x.max(bb.max.x);
+            max_y = max_y.max(bb.max.y);
+        }
+    }
+
     let text_width = (max_x - min_x) as u32;
     let text_height = (max_y - min_y) as u32;
 
     let stamp_width = text_width + 20;
     let stamp_height = text_height + 20;
+
     let mut text_stamp = RgbaImage::from_pixel(stamp_width, stamp_height, Rgba([0, 0, 0, 0]));
-    let offset = point(10.0 - min_x as f32, 10.0 - min_y as f32 + v_metrics.ascent);
-    for glyph in font.layout(text, scale, offset) {
-        if let Some(bb) = glyph.pixel_bounding_box() {
-            glyph.draw(|gx, gy, v| {
-                let x = bb.min.x + gx as i32;
-                let y = bb.min.y + gy as i32;
-                if x >= 0 && y >= 0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
+
+    // Draw
+    let mut caret = ab_glyph::point(10.0 - min_x, 10.0 - min_y + scaled_font.ascent());
+    let mut previous = None;
+    for c in text.chars() {
+        let glyph_id = font.glyph_id(c);
+        if let Some(prev_id) = previous {
+            caret.x += scaled_font.kern(prev_id, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(64.0, caret);
+        caret.x += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
+
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            og.draw(|gx, gy, v| {
+                let x = bb.min.x + gx as f32;
+                let y = bb.min.y + gy as f32;
+                if x >= 0.0 && y >= 0.0 && (x as u32) < stamp_width && (y as u32) < stamp_height {
                     let alpha = (v * 255.0).round() as u8;
                     text_stamp.put_pixel(x as u32, y as u32, Rgba([255, 255, 255, alpha]));
                 }
